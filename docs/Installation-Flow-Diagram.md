@@ -247,14 +247,20 @@ flowchart TD
 
     RegState -->|Yes| Dial[sudo mmcli -m 0 --voice-create-call]
     Dial --> CallProgress{Call progression?}
-    CallProgress -->|dialing -> ringing-out -> answered| CallOK[✅ Voice call confirmed working]
-    CallProgress -->|Stuck 'dialing', self-terminates ~30s| NotDialIssue[Not a dialing problem - registration/attach issue]
+    CallProgress -->|dialing -> ringing-out -> active| CallOK[✅ Call connected]
+    CallProgress -->|Stuck 'dialing', self-terminates ~30s| NotDialIssue[Recheck registration/attach; if fine, may be no 3G/2G fallback]
     NotDialIssue --> WaitReg
 
     CallOK --> AudioGap[Audio needs SPK+/SPK-/MIC+/MIC- wired to speaker/mic - not yet done]
-    AudioGap --> DataGap[Still open: NetworkManager GSM connection + APN for data]
+
+    RegState -->|Yes| Data[sudo little-rascal-mobile-data]
+    Data --> DataTest{ping -I wwan0 8.8.8.8 works?}
+    DataTest -->|Yes| DataOK[✅ Mobile data working]
+    DataTest -->|No| CheckApn[Check registration and carrier APN]
+    CheckApn --> Data
 
     style CallOK fill:#90EE90
+    style DataOK fill:#90EE90
     style FullCycle fill:#FFB6C6
     style WorseState fill:#FFB6C6
     style NotDialIssue fill:#FFB6C6
@@ -276,10 +282,28 @@ while troubleshooting a "searching" state tend to leave the modem
 manually-locked in a worse state. A clean power cycle (with SIM/antennas
 already seated) is the reliable fix, not further poking.
 
-**A stuck "dialing" call is a registration problem:** if a call
-self-terminates after ~30s instead of progressing to `ringing-out`, go back
-and re-verify `registered` + `attached` state rather than debugging the
-dial command itself.
+**A stuck "dialing" call:** if a call self-terminates after ~30s instead of
+progressing to `ringing-out`, re-verify `registered` + `attached` state first.
+If those are fine, the cause may be the network: on LTE, a normal call needs
+VoLTE or a 3G/2G fallback, which some locations don't have.
+
+## Camera App Setup Flow (Optional)
+
+```mermaid
+flowchart TD
+    CStart([setup.sh installs the Camera app]) --> Open[Open Camera from the app list]
+    Open --> Started{Preview starts?}
+    Started -->|Camera error, busy| Close[Close the other app using the camera]
+    Close --> Open
+    Started -->|Black picture| Light[Remove lens cover, add light, reseat ribbon cable]
+    Light --> Open
+    Started -->|Yes| Orientation{Upright?}
+    Orientation -->|Upside down| Rotate[Change ROTATION to 90 in /usr/local/bin/little-rascal-camera]
+    Rotate --> Open
+    Orientation -->|Yes| Ready[✅ Take photos and videos]
+
+    style Ready fill:#90EE90
+```
 
 ## Common Pitfalls and Solutions
 
@@ -293,7 +317,10 @@ dial command itself.
 | nmtui Missing | Can't configure WiFi with nmtui | Use raspi-config instead |
 | Modem won't register | Stuck on "searching" 90s+ | Power cycle with SIM/antennas already seated |
 | Weak/no uplink on cellular | Signal looks fine but calls/data fail | Reseat MAIN antenna — u.FL connector must click |
-| Call self-terminates while dialing | Stuck "dialing" ~30s then drops | Registration/attach issue, not a dialing issue |
+| Call self-terminates while dialing | Stuck "dialing" ~30s then drops | Recheck registration/attach; if fine, may be no 3G/2G fallback |
+| Mobile data won't start | Connection fails to activate | Check registration and carrier APN |
+| Camera busy | "Camera __init__ sequence did not complete" | Close the other app using the camera |
+| Videos won't open | VLC closes after a few seconds | Check the VLC launcher override is in place |
 
 ## Timeline: Typical Installation
 
