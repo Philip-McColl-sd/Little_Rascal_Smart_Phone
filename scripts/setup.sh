@@ -40,6 +40,8 @@
 # WARNING: this script modifies system configuration (sudoers, SDDM,
 # Plasma files). Use it at your own risk.
 #
+# Step 11 embeds the Camera app (GPL-3.0-or-later, like the rest of this file).
+#
 # This file embeds a modified copy of KDE's Logout.qml (section 9.5),
 # which keeps its original copyright notices and remains licensed
 # under GPL-2.0-or-later.
@@ -643,7 +645,607 @@ if [ -n "$CONFIG_FILE" ]; then
 fi
 
 ################################################################################
-# Step 11: Verification
+# Step 11: Install the Camera App
+################################################################################
+log_info "Installing the Camera app (photos and video)..."
+
+# plasma-camera has no apt candidate on Raspberry Pi OS, so the app below uses
+# picamera2 and PyQt5. VLC plays the clips. A failure here shouldn't abort the
+# whole install, since the camera is optional hardware.
+CAMERA_PACKAGES=(
+    python3-picamera2
+    python3-pyqt5
+    qtwayland5
+    ffmpeg
+    vlc
+    rpicam-apps-lite
+)
+
+if ! sudo apt-get -o Acquire::ForceIPv4=true install -y "${CAMERA_PACKAGES[@]}"; then
+    log_warning "Failed to install camera packages. The Camera app may not work."
+fi
+
+sudo usermod -aG video "$(whoami)"
+
+if [ -n "$CONFIG_FILE" ] && ! grep -q "^camera_auto_detect=1" "$CONFIG_FILE"; then
+    log_warning "camera_auto_detect=1 is not set in $CONFIG_FILE, so the camera may not be detected"
+fi
+
+sudo tee /usr/local/bin/little-rascal-camera > /dev/null <<'CAMERA_APP_EOF'
+#!/usr/bin/python3
+# SPDX-FileCopyrightText: 2026 Philip McColl
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Touch camera app for the Little Rascal phone (Pi camera via picamera2)."""
+
+import os
+import queue
+import subprocess
+import sys
+from datetime import datetime
+
+from PyQt5.QtCore import QElapsedTimer, QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPixmap, QTransform
+from PyQt5.QtWidgets import (
+    QAbstractButton,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+PHOTO_DIR = os.path.expanduser("~/Pictures/Camera")
+VIDEO_DIR = os.path.expanduser("~/Videos/Camera")
+THUMB_CACHE = os.path.expanduser("~/.cache/little-rascal-camera/last-video.jpg")
+PREVIEW_SIZE = (640, 480)
+VIDEO_SIZE = (1280, 720)
+VIDEO_FPS = 30
+VIDEO_BITRATE = 8_000_000
+THUMB_SIZE = 64
+# Clockwise degrees to turn the landscape sensor image upright: 90 or 270.
+# libcamera on the Pi can only flip, so this is done in software.
+ROTATION = 270
+
+
+class CameraThread(QThread):
+    """Owns the camera: streams preview frames, takes stills, records video."""
+
+    frame_ready = pyqtSignal(QImage)
+    mode_ready = pyqtSignal(str)
+    photo_saved = pyqtSignal(str)
+    recording_started = pyqtSignal()
+    video_saved = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._stopping = False
+        self._commands = queue.Queue()
+        self._recording = None
+
+    def take_photo(self, path):
+        self._commands.put(("photo", path))
+
+    def set_mode(self, mode):
+        self._commands.put(("mode", mode))
+
+    def start_recording(self, path):
+        self._commands.put(("start_recording", path))
+
+    def stop_recording(self):
+        self._commands.put(("stop_recording", None))
+
+    def stop(self):
+        self._stopping = True
+        self.wait()
+
+    def _start_recording(self, camera, path):
+        from picamera2.encoders import H264Encoder
+        from picamera2.outputs import PyavOutput
+
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        unrotated = path + ".part.mp4"
+        camera.start_encoder(H264Encoder(bitrate=VIDEO_BITRATE), PyavOutput(unrotated))
+        self._recording = path
+        self.recording_started.emit()
+
+    def _finish_recording(self, camera):
+        path, self._recording = self._recording, None
+        unrotated = path + ".part.mp4"
+        camera.stop_encoder()
+        # The hardware encoder can't rotate, so flag the rotation in the MP4
+        # for players to apply. -display_rotation is counter-clockwise.
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-display_rotation", str(360 - ROTATION), "-i", unrotated,
+             "-c", "copy", path],
+            check=True,
+        )
+        os.remove(unrotated)
+        self.video_saved.emit(path)
+
+    def run(self):
+        # Imported here so the window appears right away; this import is slow.
+        from picamera2 import Picamera2
+
+        camera = None
+        try:
+            camera = Picamera2()
+            configs = {
+                "photo": camera.create_preview_configuration(
+                    main={"size": PREVIEW_SIZE, "format": "RGB888"}
+                ),
+                "video": camera.create_video_configuration(
+                    main={"size": VIDEO_SIZE, "format": "RGB888"},
+                    # The binned full-sensor mode; the 1080p mode is a narrow crop.
+                    raw={"size": (1296, 972)},
+                    controls={"FrameDurationLimits": (1000000 // VIDEO_FPS,) * 2},
+                ),
+            }
+            still = camera.create_still_configuration()
+            mode = "photo"
+            camera.configure(configs[mode])
+            camera.start()
+            self.mode_ready.emit(mode)
+            while not self._stopping:
+                try:
+                    command, value = self._commands.get_nowait()
+                except queue.Empty:
+                    command = None
+                if command == "photo":
+                    photo = camera.switch_mode_and_capture_image(still)
+                    # PIL rotates counter-clockwise.
+                    photo.rotate(-ROTATION, expand=True).save(value, quality=95)
+                    self.photo_saved.emit(value)
+                    continue
+                if command == "mode":
+                    mode = value
+                    camera.stop()
+                    camera.configure(configs[mode])
+                    camera.start()
+                    self.mode_ready.emit(mode)
+                    continue
+                if command == "start_recording":
+                    self._start_recording(camera, value)
+                elif command == "stop_recording":
+                    self._finish_recording(camera)
+                frame = camera.capture_array("main")
+                if mode == "video":
+                    # Half size is plenty for the screen and keeps rotation cheap.
+                    frame = frame[::2, ::2].copy()
+                height, width, _ = frame.shape
+                # libcamera's RGB888 is B, G, R in memory.
+                image = QImage(
+                    frame.data, width, height, frame.strides[0], QImage.Format_BGR888
+                )
+                # transformed() makes its own copy of the camera's buffer.
+                self.frame_ready.emit(image.transformed(QTransform().rotate(ROTATION)))
+        except Exception as error:
+            self.failed.emit(str(error))
+        finally:
+            if camera is not None:
+                if self._recording:
+                    self._finish_recording(camera)
+                camera.close()
+
+
+class Viewfinder(QWidget):
+    """Draws the latest frame scaled to fit, keeping its aspect ratio."""
+
+    def __init__(self):
+        super().__init__()
+        self._image = None
+
+    def show_frame(self, image):
+        self._image = image
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.black)
+        if self._image is None:
+            return
+        size = self._image.size().scaled(self.size(), Qt.KeepAspectRatio)
+        target = QRectF(
+            (self.width() - size.width()) / 2,
+            (self.height() - size.height()) / 2,
+            size.width(),
+            size.height(),
+        )
+        painter.drawImage(target, self._image)
+
+
+class ShutterButton(QAbstractButton):
+    video_mode = False
+    recording = False
+
+    def sizeHint(self):
+        return QSize(84, 84)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        side = min(self.width(), self.height())
+        outer = QRectF(
+            (self.width() - side) / 2 + 3, (self.height() - side) / 2 + 3, side - 6, side - 6
+        )
+        painter.setPen(QColor("white"))
+        pen = painter.pen()
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawEllipse(outer)
+        if not self.isEnabled():
+            fill = QColor("#666666")
+        elif self.video_mode:
+            fill = QColor("#a01818") if self.isDown() else QColor("#e02020")
+        elif self.isDown():
+            fill = QColor("#bbbbbb")
+        else:
+            fill = QColor("white")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(fill)
+        if self.recording:
+            painter.drawRoundedRect(outer.adjusted(22, 22, -22, -22), 4, 4)
+        else:
+            painter.drawEllipse(outer.adjusted(8, 8, -8, -8))
+
+
+class CameraWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Camera")
+        self.setStyleSheet("background-color: black; color: white;")
+        self._last_capture = None
+        self._video_mode = False
+        self._recording = False
+        self._elapsed = QElapsedTimer()
+        self._clock = QTimer(self)
+        self._clock.setInterval(500)
+        self._clock.timeout.connect(self.show_elapsed)
+
+        self.viewfinder = Viewfinder()
+        self.status = QLabel("Starting camera…")
+        self.status.setAlignment(Qt.AlignCenter)
+        self.status.setWordWrap(True)
+
+        self.shutter = ShutterButton()
+        self.shutter.setEnabled(False)
+        self.shutter.setFixedSize(self.shutter.sizeHint())
+        self.shutter.clicked.connect(self.on_shutter)
+
+        self.thumbnail = QToolButton()
+        self.thumbnail.setFixedSize(THUMB_SIZE, THUMB_SIZE)
+        self.thumbnail.setIconSize(QSize(THUMB_SIZE - 4, THUMB_SIZE - 4))
+        self.thumbnail.setStyleSheet("border: 1px solid #555555;")
+        self.thumbnail.clicked.connect(self.open_last_capture)
+        self.thumbnail.setEnabled(False)
+
+        # Same width as the thumbnail, so the shutter stays centred.
+        self.mode_button = QToolButton()
+        self.mode_button.setText("Video")
+        self.mode_button.setFixedSize(THUMB_SIZE, THUMB_SIZE)
+        self.mode_button.setStyleSheet("border: 1px solid #555555;")
+        self.mode_button.setEnabled(False)
+        self.mode_button.clicked.connect(self.toggle_mode)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(20, 8, 20, 16)
+        controls.addWidget(self.thumbnail)
+        controls.addStretch()
+        controls.addWidget(self.shutter)
+        controls.addStretch()
+        controls.addWidget(self.mode_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.viewfinder, 1)
+        layout.addWidget(self.status)
+        layout.addLayout(controls)
+
+        self.load_latest_capture()
+
+        self.camera = CameraThread()
+        self.camera.frame_ready.connect(self.viewfinder.show_frame)
+        self.camera.mode_ready.connect(self.on_mode_ready)
+        self.camera.recording_started.connect(self.on_recording_started)
+        self.camera.video_saved.connect(self.on_video_saved)
+        self.camera.photo_saved.connect(self.on_photo_saved)
+        self.camera.failed.connect(self.on_failed)
+        self.camera.start()
+
+    def on_mode_ready(self, mode):
+        self._video_mode = mode == "video"
+        self.shutter.video_mode = self._video_mode
+        self.mode_button.setText("Photo" if self._video_mode else "Video")
+        self.mode_button.setEnabled(True)
+        self.shutter.setEnabled(True)
+        self.status.clear()
+
+    def toggle_mode(self):
+        self.shutter.setEnabled(False)
+        self.mode_button.setEnabled(False)
+        self.camera.set_mode("photo" if self._video_mode else "video")
+
+    def on_shutter(self):
+        if not self._video_mode:
+            self.take_photo()
+        elif self._recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def timestamp(self):
+        return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+    def take_photo(self):
+        os.makedirs(PHOTO_DIR, exist_ok=True)
+        self.shutter.setEnabled(False)
+        self.mode_button.setEnabled(False)
+        self.status.setText("Saving…")
+        self.camera.take_photo(os.path.join(PHOTO_DIR, f"IMG_{self.timestamp()}.jpg"))
+
+    def on_photo_saved(self, path):
+        self.shutter.setEnabled(True)
+        self.mode_button.setEnabled(True)
+        self.show_saved(path)
+
+    def start_recording(self):
+        self.shutter.setEnabled(False)
+        self.mode_button.setEnabled(False)
+        self.camera.start_recording(os.path.join(VIDEO_DIR, f"VID_{self.timestamp()}.mp4"))
+
+    def on_recording_started(self):
+        self._recording = True
+        self.shutter.recording = True
+        self.shutter.setEnabled(True)
+        self._elapsed.start()
+        self._clock.start()
+        self.show_elapsed()
+
+    def show_elapsed(self):
+        seconds = self._elapsed.elapsed() // 1000
+        self.status.setText(f"● {seconds // 60:02d}:{seconds % 60:02d}")
+
+    def stop_recording(self):
+        self._clock.stop()
+        self.shutter.setEnabled(False)
+        self.status.setText("Saving…")
+        self.camera.stop_recording()
+
+    def on_video_saved(self, path):
+        self._recording = False
+        self.shutter.recording = False
+        self.shutter.setEnabled(True)
+        self.mode_button.setEnabled(True)
+        self.show_saved(path)
+
+    def show_saved(self, path):
+        self.status.setText("Saved " + os.path.basename(path))
+        QTimer.singleShot(2500, self.clear_saved_message)
+        self.set_last_capture(path)
+
+    def clear_saved_message(self):
+        if self.status.text().startswith("Saved "):
+            self.status.clear()
+
+    def on_failed(self, message):
+        self._clock.stop()
+        self.shutter.setEnabled(False)
+        self.mode_button.setEnabled(False)
+        self.status.setText("Camera error: " + message)
+
+    def load_latest_capture(self):
+        captures = []
+        for folder, suffix in ((PHOTO_DIR, ".jpg"), (VIDEO_DIR, ".mp4")):
+            if os.path.isdir(folder):
+                captures += [
+                    os.path.join(folder, name)
+                    for name in os.listdir(folder)
+                    if name.endswith(suffix) and not name.endswith(".part.mp4")
+                ]
+        if captures:
+            self.set_last_capture(max(captures, key=os.path.getmtime))
+
+    def set_last_capture(self, path):
+        image_path = path
+        if path.endswith(".mp4"):
+            os.makedirs(os.path.dirname(THUMB_CACHE), exist_ok=True)
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+                 "-frames:v", "1", THUMB_CACHE]
+            )
+            image_path = THUMB_CACHE
+        reader = QImageReader(image_path)
+        reader.setAutoTransform(True)
+        size = reader.size().scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio)
+        reader.setScaledSize(size)
+        self.thumbnail.setIcon(QIcon(QPixmap.fromImage(reader.read())))
+        self.thumbnail.setEnabled(True)
+        self._last_capture = path
+
+    def open_last_capture(self):
+        if self._last_capture:
+            subprocess.Popen(["xdg-open", self._last_capture])
+
+    def closeEvent(self, event):
+        # Release the camera, otherwise the next launch finds it busy.
+        self.camera.stop()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Camera")
+    app.setDesktopFileName("org.littlerascal.camera")
+    app.setWindowIcon(QIcon.fromTheme("camera-photo"))
+    window = CameraWindow()
+    window.showMaximized()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
+CAMERA_APP_EOF
+sudo chmod 755 /usr/local/bin/little-rascal-camera
+
+sudo mkdir -p /usr/local/share/applications
+sudo tee /usr/local/share/applications/org.littlerascal.camera.desktop > /dev/null <<'EOF'
+# SPDX-FileCopyrightText: 2026 Philip McColl
+# SPDX-License-Identifier: GPL-3.0-or-later
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Take photos and videos with the Raspberry Pi camera
+Exec=/usr/local/bin/little-rascal-camera
+Icon=camera-photo
+Terminal=false
+Categories=Graphics;Photography;
+X-KDE-FormFactor=handset;tablet;desktop;
+EOF
+
+# Confirmed live: VLC segfaults about 3s after opening any file in the Plasma
+# session, because the Breeze style calls KX11Extras::compositingActive with no
+# usable xcb connection. /usr/local/share comes first in the default
+# XDG_DATA_DIRS, so this copy overrides the system entry.
+if [ -f /usr/share/applications/vlc.desktop ]; then
+    sed 's#^Exec=/usr/bin/vlc#Exec=env QT_STYLE_OVERRIDE=Fusion /usr/bin/vlc#' \
+        /usr/share/applications/vlc.desktop | \
+        sudo tee /usr/local/share/applications/vlc.desktop > /dev/null
+fi
+
+log_success "Camera app installed"
+
+################################################################################
+# Step 12: Set Up the Cellular Modem (Waveshare SIM7600G-H 4G HAT)
+################################################################################
+log_info "Installing cellular modem support..."
+
+# The modem itself needs only stock drivers and ModemManager. Calls and SMS use
+# plasma-dialer and spacebar from Step 5. Optional hardware, so never fatal.
+MODEM_PACKAGES=(
+    modemmanager
+    network-manager
+    libqmi-utils
+    mobile-broadband-provider-info
+)
+
+if ! sudo apt-get -o Acquire::ForceIPv4=true install -y "${MODEM_PACKAGES[@]}"; then
+    log_warning "Failed to install modem packages. Mobile data may not work."
+fi
+
+sudo systemctl enable --now ModemManager || log_warning "Could not enable ModemManager"
+
+# Kept as a script file so it can also be run later, when the HAT or a new SIM
+# is fitted after the install.
+sudo tee /usr/local/bin/little-rascal-mobile-data > /dev/null <<'MOBILE_DATA_EOF'
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 Philip McColl
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Creates the NetworkManager connection for the cellular modem. Reads the SIM's
+# operator from the modem and looks up its APN in mobile-broadband-provider-info.
+#
+# Usage: sudo little-rascal-mobile-data [APN]
+#        little-rascal-mobile-data --dry-run [APN]
+
+set -e
+
+CONNECTION="Mobile Data"
+DRY_RUN=0
+if [ "$1" = "--dry-run" ]; then
+    DRY_RUN=1
+    shift
+fi
+APN="$1"
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$EUID" -ne 0 ]; then
+    echo "Please run with sudo." >&2
+    exit 1
+fi
+
+# The modem's index can change when it re-enumerates, so don't assume 0.
+MODEM=$(mmcli -L 2>/dev/null | grep -oE 'Modem/[0-9]+' | head -1 | cut -d/ -f2)
+if [ -z "$MODEM" ]; then
+    echo "No modem found. Check the HAT's USB link and power, then try again." >&2
+    exit 1
+fi
+
+if [ "$DRY_RUN" -eq 0 ] && nmcli -t -f TYPE connection show | grep -qx gsm; then
+    echo "A mobile connection already exists:"
+    nmcli -t -f NAME,TYPE connection show | grep ':gsm$'
+    exit 0
+fi
+
+OPERATOR=$(mmcli -m "$MODEM" -K | awk -F': *' '/modem\.3gpp\.operator-code/ {print $2}')
+
+LOOKUP=$(python3 -I - "$OPERATOR" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+try:
+    root = ET.parse("/usr/share/mobile-broadband-provider-info/serviceproviders.xml").getroot()
+except (OSError, ET.ParseError):
+    sys.exit(0)
+for gsm in root.iter("gsm"):
+    ids = [n.get("mcc", "") + n.get("mnc", "") for n in gsm.findall("network-id")]
+    if sys.argv[1] not in ids:
+        continue
+    for apn in gsm.findall("apn"):
+        if any(u.get("type") == "internet" for u in apn.findall("usage")):
+            print("|".join([apn.get("value"), apn.findtext("username") or "", apn.findtext("password") or ""]))
+            sys.exit(0)
+PY
+)
+IFS='|' read -r FOUND_APN FOUND_USER FOUND_PASS <<< "$LOOKUP"
+
+echo "Operator: ${OPERATOR:-unknown}, suggested APN: ${FOUND_APN:-none}"
+
+if [ -z "$APN" ] && [ "$DRY_RUN" -eq 0 ]; then
+    read -r -p "APN to use [${FOUND_APN}] (Ctrl+C to cancel): " APN < /dev/tty
+fi
+APN="${APN:-$FOUND_APN}"
+if [ -z "$APN" ]; then
+    echo "No APN known for this SIM. Ask your carrier, then run this again with it:" >&2
+    echo "  sudo little-rascal-mobile-data <APN>" >&2
+    exit 1
+fi
+
+# Metric 700 keeps Wi-Fi (metric 600) as the preferred route when it's available.
+ARGS=(connection add type gsm ifname "*" con-name "$CONNECTION" apn "$APN"
+      connection.autoconnect yes ipv4.route-metric 700 ipv6.method disabled)
+# The database's credentials only belong to the APN it suggested.
+[ "$APN" = "$FOUND_APN" ] || FOUND_USER=""
+if [ -n "$FOUND_USER" ]; then
+    ARGS+=(gsm.username "$FOUND_USER" gsm.password "$FOUND_PASS")
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "Would run: nmcli connection add type gsm ifname \"*\" con-name \"$CONNECTION\" apn $APN (username: ${FOUND_USER:-none})"
+    exit 0
+fi
+
+nmcli "${ARGS[@]}"
+nmcli connection up "$CONNECTION"
+MOBILE_DATA_EOF
+sudo chmod 755 /usr/local/bin/little-rascal-mobile-data
+
+if mmcli -L 2>/dev/null | grep -q 'Modem/'; then
+    log_info "Modem detected, setting up mobile data..."
+    if sudo little-rascal-mobile-data; then
+        log_success "Mobile data configured"
+    else
+        log_warning "Mobile data not configured. Try later with: sudo little-rascal-mobile-data"
+    fi
+else
+    log_info "No modem detected. After fitting the HAT and SIM, run: sudo little-rascal-mobile-data"
+fi
+
+log_success "Cellular modem support installed"
+
+################################################################################
+# Step 13: Verification
 ################################################################################
 log_info "Verifying installation..."
 
@@ -692,8 +1294,31 @@ else
     log_warning "Switch Session button not found (non-fatal)"
 fi
 
+# Check the Camera app and what it needs to run
+if [ -x /usr/local/bin/little-rascal-camera ] && \
+   [ -f /usr/local/share/applications/org.littlerascal.camera.desktop ] && \
+   python3 -c "import picamera2, PyQt5.QtWidgets" 2>/dev/null; then
+    log_success "Camera app verified"
+else
+    log_warning "Camera app or its libraries not found (non-fatal)"
+fi
+
+# Check that the VLC crash workaround is in place
+if grep -q "QT_STYLE_OVERRIDE=Fusion" /usr/local/share/applications/vlc.desktop 2>/dev/null; then
+    log_success "VLC launcher verified"
+else
+    log_warning "VLC launcher override not found, so videos may not open (non-fatal)"
+fi
+
+# Check modem support. A modem and a SIM are optional, so only report them.
+if [ -x /usr/local/bin/little-rascal-mobile-data ] && systemctl is-enabled ModemManager &> /dev/null; then
+    log_success "Cellular modem support verified"
+else
+    log_warning "Cellular modem support not found (non-fatal)"
+fi
+
 ################################################################################
-# Step 12: Installation Complete
+# Step 14: Installation Complete
 ################################################################################
 echo ""
 echo "################################################################################"
@@ -709,7 +1334,9 @@ echo "  1. Reboot your Raspberry Pi: sudo reboot"
 echo "  2. After reboot, you will boot straight into the Plasma Mobile lock screen"
 echo "  3. Unlock with your username and password"
 echo "  4. Use power menu → 'Switch Session' to reach the SDDM greeter/session picker"
-echo "  5. Enjoy your mobile Linux experience!"
+echo "  5. Open the Camera app to take photos and videos"
+echo "  6. Using the SIM7600G-H HAT? Fit the SIM and antennas with everything off, then see Step 8 of the guide"
+echo "  7. Enjoy your mobile Linux experience!"
 echo ""
 log_info "Optional configurations:"
 echo "  - Rotate display: in Plasma run 'kscreen-doctor -o', then e.g. 'kscreen-doctor output.HDMI-A-1.rotation.right'"
@@ -717,6 +1344,8 @@ echo "  - Install more apps: sudo apt search <app-name>"
 echo "  - Configure keyboard: Settings → Input Devices → Keyboard"
 echo "  - Undo lock-screen-as-login: sudo rm /etc/sddm.conf.d/autologin.conf ~/.config/autostart/lock-on-login.desktop"
 echo "  - Undo Switch Session button: sudo cp ${LOGOUT_QML}.backup ${LOGOUT_QML}; sudo rm /usr/local/bin/plasma-mobile-disable-autologin-once.sh /usr/local/bin/plasma-mobile-restore-autologin.sh /usr/local/bin/lock-and-restore-autologin.sh /etc/sudoers.d/plasma-mobile-switch-session"
+echo "  - Undo Camera app: sudo rm /usr/local/bin/little-rascal-camera /usr/local/share/applications/org.littlerascal.camera.desktop /usr/local/share/applications/vlc.desktop"
+echo "  - Undo mobile data: sudo nmcli connection delete \"Mobile Data\"; sudo rm /usr/local/bin/little-rascal-mobile-data"
 echo ""
 log_info "Troubleshooting:"
 echo "  - If screen is black: sudo systemctl restart sddm"

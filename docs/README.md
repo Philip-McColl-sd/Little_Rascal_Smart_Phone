@@ -181,7 +181,11 @@ The system will restart and boot directly into Plasma Mobile!
 
 Adds cellular voice/data hardware via the Waveshare SIM7600G-H LTE HAT. This
 procedure is confirmed working for network registration, packet-service
-attach, and a successful voice call.
+attach, mobile data, and an outgoing voice call. No custom drivers are needed:
+Debian's stock `qmi_wwan`, `option` and ModemManager handle the modem.
+
+`scripts/setup.sh` installs the software for this step. You still need to do
+the physical setup below, and mobile data needs a SIM in place (see 8.6).
 
 ### 8.1 Physical Setup (do all of this BEFORE powering anything on)
 
@@ -219,6 +223,9 @@ attach, and a successful voice call.
    registration: home
    packet service state: attached
    ```
+   If `mmcli -L` finds no modem and `lsusb` shows no SimTech device, the Pi
+   can't see the HAT at all. Check its USB link and power, and press PWR again.
+
    Getting stuck on "searching" for 90s+ almost never resolves itself by
    waiting longer or poking it with AT commands — the fix is always a clean
    power cycle with SIM/antenna properly seated, not live reconfiguration.
@@ -236,10 +243,17 @@ attach, and a successful voice call.
    ```bash
    mmcli --call=<path>
    ```
-   Expected progression: `dialing` -> `ringing-out` -> `answered`
+   Expected progression: `dialing` -> `ringing-out` -> `active` (once answered)
 
-   If it stays stuck in `dialing` and self-terminates after ~30s, that's a
-   registration/attach problem, not a dialing problem — go back to 8.2-8.3.
+   If it stays stuck in `dialing` and self-terminates after ~30s, first go
+   back to 8.2-8.3 and check registration and attach. If those look fine, the
+   cause may be the network. On LTE, a normal call needs VoLTE or a fallback to
+   3G/2G, and some locations have no 3G/2G. `AT+CEER` gives the reason (for
+   example `Timer T303 expired`), and it needs debug mode (see 8.5).
+
+   **Calls are not yet proven reliable.** With one SIM, most attempts failed
+   this way and one got through. With another, the single call tried reached
+   `ringing-out` in about 6 seconds.
 
    **Note:** this only gets you call signaling (ring/connect/hangup). Actual
    audio needs the HAT's SPK+/SPK-/MIC+/MIC- pins wired to a real
@@ -250,7 +264,9 @@ attach, and a successful voice call.
 - Don't chase registration issues with live `AT+COPS` / `AT+CNMP` mode
   switching while troubleshooting — it's easy to leave the modem in a bad
   manually-locked state, which makes things worse. If it's stuck, power
-  cycle instead of reconfiguring.
+  cycle instead of reconfiguring. A manual `AT+COPS` network lock survives
+  power cycles and SIM swaps, so a modem searching for the wrong network may
+  have a leftover lock.
 - `mmcli -m X --command=...` needs ModemManager restarted in debug mode:
   ```bash
   sudo systemctl stop ModemManager
@@ -262,11 +278,94 @@ attach, and a successful voice call.
   sudo systemctl start ModemManager
   ```
 
-### 8.6 Still Open
+### 8.6 Set Up Mobile Data
 
-Data/internet setup (NetworkManager GSM connection + APN) is not yet
-configured. The registered/attached state from 8.3 is the prerequisite,
-which is now reliably achievable via the procedure above.
+The registered/attached state from 8.3 is the prerequisite.
+
+**If you used `setup.sh`:** it sets this up during the install when it detects
+a modem. If the HAT or SIM wasn't in place yet, run this afterwards:
+```bash
+sudo little-rascal-mobile-data
+```
+It reads the SIM's operator from the modem, suggests the matching APN, and lets
+you press Enter to accept it or type another. To skip the question, pass the
+APN directly: `sudo little-rascal-mobile-data internet`.
+
+**Manual setup:** find your carrier's APN and create the connection. This
+example is for WOM Chile, whose APN is `internet` with no username or password:
+```bash
+sudo apt install -y modemmanager network-manager mobile-broadband-provider-info
+sudo nmcli connection add type gsm ifname "*" con-name "Mobile Data" apn internet connection.autoconnect yes ipv4.route-metric 700 ipv6.method disabled
+sudo nmcli connection up "Mobile Data"
+```
+Metric 700 keeps Wi-Fi as the preferred connection when it's available, so
+this doesn't normally use your data plan while you're on Wi-Fi.
+
+**Test it through the modem**, because normal traffic still goes over Wi-Fi:
+```bash
+ping -I wwan0 -c 4 8.8.8.8
+curl --interface wwan0 -I https://www.gstatic.com/generate_204
+```
+
+Confirmed on WOM Chile over LTE with Wi-Fi also connected. Not yet confirmed:
+data with Wi-Fi turned off, reconnecting by itself after a reboot, and carriers
+that need a username and password.
+
+---
+
+## Step 9: Camera (Optional) — Photos and Video
+
+Adds a touch Camera app for the Raspberry Pi camera connected to the camera
+port. Confirmed on the 5MP OV5647 camera, which Raspberry Pi OS detects with
+its default `camera_auto_detect=1`.
+
+### 9.1 Install
+
+**If you used `setup.sh`:** this is already done. Open **Camera** from the app
+list.
+
+**Manual setup:** the app is embedded in `setup.sh`, so install its packages
+and extract it from there:
+```bash
+sudo apt install -y python3-picamera2 python3-pyqt5 qtwayland5 ffmpeg vlc rpicam-apps-lite
+curl -fsSL https://raw.githubusercontent.com/Philip-McColl-sd/Little_Rascal_Smart_Phone/main/scripts/setup.sh | awk "/<<'CAMERA_APP_EOF'\$/{f=1;next} /^CAMERA_APP_EOF\$/{f=0} f" | sudo tee /usr/local/bin/little-rascal-camera > /dev/null
+sudo chmod 755 /usr/local/bin/little-rascal-camera
+sudo mkdir -p /usr/local/share/applications
+sudo sed 's#^Exec=/usr/bin/vlc#Exec=env QT_STYLE_OVERRIDE=Fusion /usr/bin/vlc#' /usr/share/applications/vlc.desktop | sudo tee /usr/local/share/applications/vlc.desktop > /dev/null
+```
+Then create `/usr/local/share/applications/org.littlerascal.camera.desktop`:
+```ini
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Take photos and videos with the Raspberry Pi camera
+Exec=/usr/local/bin/little-rascal-camera
+Icon=camera-photo
+Terminal=false
+Categories=Graphics;Photography;
+X-KDE-FormFactor=handset;tablet;desktop;
+```
+
+The `vlc.desktop` copy is needed because VLC otherwise crashes about 3 seconds
+after opening any file in the Plasma session, so recorded videos won't play.
+
+### 9.2 Use It
+
+- **Photo:** tap the white button. Photos save at 1944x2592 to
+  `~/Pictures/Camera/`.
+- **Video:** tap **Video**, then the red button to start and the red square to
+  stop. Clips save at 1280x720, about 30 fps, to `~/Videos/Camera/`. There's no
+  sound, because this setup has no microphone.
+- **Review:** tap the thumbnail to open your latest photo or video.
+
+Only one app can use the camera at a time. Indoors, video is dimmer than photos
+and can show motion blur, because 30 fps limits the exposure time.
+
+### 9.3 If the Picture Is Upside Down
+
+Photos and video are rotated for portrait use with `ROTATION = 270`, which
+suits the Little Rascal build. If your camera is mounted the other way, change
+it to `ROTATION = 90` near the top of `/usr/local/bin/little-rascal-camera`.
 
 ---
 
@@ -337,9 +436,35 @@ a hot SIM swap or a loose MAIN antenna won't be detected until a fresh
 power-on.
 
 ### Issue: Voice call stays in "dialing" and self-terminates (~30s)
-**Solution:** This is a registration/attach problem, not a dialing problem.
-Re-check `mmcli -m 0` shows `state: registered` and `packet service state:
-attached` (Step 8.3) before retrying the call.
+**Solution:** Re-check `mmcli -m 0` shows `state: registered` and `packet
+service state: attached` (Step 8.3), then retry the call. If those are fine,
+the cause may be the network, such as no 3G/2G fallback at your location (see
+Step 8.4).
+
+### Issue: Mobile data connection won't start
+**Solution:** Check the modem is `registered` and `attached` (Step 8.3), then
+check the APN with your carrier. An old connection failing with `no-secrets`
+means it needs a username and password that weren't saved:
+```bash
+nmcli connection show
+sudo nmcli connection delete "<name>"
+sudo little-rascal-mobile-data
+```
+
+### Issue: Camera app shows "Camera __init__ sequence did not complete"
+**Solution:** Another app has the camera open, often a second copy of Camera.
+Close it and reopen the app.
+
+### Issue: Camera preview and photos are black
+**Solution:** The camera is covered or in the dark. Remove any lens cover and
+point it at something bright. If it's still black, turn the phone off and
+reseat the ribbon cable at both ends.
+
+### Issue: Videos won't open, or VLC closes after a few seconds
+**Solution:** Check that the launcher override from Step 9.1 is in place:
+```bash
+grep QT_STYLE_OVERRIDE /usr/local/share/applications/vlc.desktop
+```
 
 ### Issue: `mmcli -m X --command=...` returns "Unauthorized: debug mode"
 **Solution:** ModemManager needs to be running in debug mode for that
@@ -402,6 +527,8 @@ This installation gives you:
 - ✅ A working mobile Linux interface on Raspberry Pi 4
 - ✅ Touch-optimized UI
 - ✅ Mobile apps (browser, dialer, messages, etc.)
+- ✅ A Camera app for photos and video
+- ✅ Mobile data and outgoing calls with the optional SIM7600G-H HAT
 - ✅ Access to full Debian package repositories
 - ✅ Regular security updates via `apt`
 
@@ -409,12 +536,22 @@ This installation gives you:
 - Not all hardware features may work perfectly (depends on your specific setup)
 - Performance depends heavily on SD card speed and RAM amount
 - Some mobile-specific features (GPS, cellular) require additional hardware —
-  cellular voice/registration is covered in Step 8 (Waveshare SIM7600G-H
-  4G HAT); mobile data (APN/NetworkManager GSM connection) is still open
+  cellular is covered in Step 8 (Waveshare SIM7600G-H 4G HAT)
+- Call audio needs a speaker and mic wired to the HAT, and call reliability
+  depends on your network
+- Video has no sound, because this setup has no microphone
 
 ---
 
 ## Changelog
+
+**2026-10-31:** Added the Camera app and mobile data
+- `setup.sh` now installs a Camera app for photos and video (Step 9) and the
+  VLC launcher fix that playback needs
+- `setup.sh` now installs modem support and `little-rascal-mobile-data`, which
+  sets up the mobile connection using the SIM's operator (Step 8.6)
+- Corrected the notes on calls: a call stuck in `dialing` isn't always a
+  registration problem
 
 **2026-10-23:** Synced with the live device
 - Fixed autologin never being restored after "Switch Session" (the restore

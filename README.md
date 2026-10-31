@@ -64,7 +64,8 @@ Raspberry Pi OS → Based on Debian (Bookworm, now Trixie) → Has plasma-mobile
 - 🔧 **Highly customizable** - Change everything
 - 🔒 **Privacy-focused** - No Google, no tracking
 - 🆓 **100% Free and Open Source**
-- 📡 **Cellular voice (optional)** - Waveshare SIM7600G-H 4G HAT, see [docs/README.md Step 8](docs/README.md#step-8-connect-cellular-modem-optional--waveshare-sim7600g-h-4g-hat)
+- 📷 **Camera app (optional)** - Photos and silent video with the Raspberry Pi camera, see [docs/README.md Step 9](docs/README.md#step-9-camera-optional--photos-and-video)
+- 📡 **Cellular data and calls (optional)** - Waveshare SIM7600G-H 4G HAT, see [docs/README.md Step 8](docs/README.md#step-8-connect-cellular-modem-optional--waveshare-sim7600g-h-4g-hat)
 
 ## 📋 Prerequisites
 
@@ -75,7 +76,8 @@ Raspberry Pi OS → Based on Debian (Bookworm, now Trixie) → Has plasma-mobile
 - **Monitor** (HDMI or touchscreen)
 - **Keyboard** (for initial setup)
 - **Ethernet cable** OR WiFi credentials
-- *Optional:* **Waveshare SIM7600G-H 4G HAT** + SIM card (for cellular voice, see [docs/README.md Step 8](docs/README.md#step-8-connect-cellular-modem-optional--waveshare-sim7600g-h-4g-hat))
+- *Optional:* **Waveshare SIM7600G-H 4G HAT** + SIM card (for mobile data and calls, see [docs/README.md Step 8](docs/README.md#step-8-connect-cellular-modem-optional--waveshare-sim7600g-h-4g-hat))
+- *Optional:* **Raspberry Pi camera** on the camera port (confirmed with a 5MP OV5647, see [docs/README.md Step 9](docs/README.md#step-9-camera-optional--photos-and-video))
 
 ### Software Requirements
 - [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
@@ -115,6 +117,8 @@ Raspberry Pi OS → Based on Debian (Bookworm, now Trixie) → Has plasma-mobile
 | Terminal instead of GUI after reboot | Install SDDM: `sudo apt install sddm` |
 | SSH connection fails after reboot | IP changed: `hostname -I` |
 | SIM7600G-H modem stuck "searching" | Power cycle with SIM/antennas seated before power-on |
+| Mobile data not set up | `sudo little-rascal-mobile-data` |
+| Camera picture black | Remove any lens cover and add light, then reseat the ribbon cable |
 
 See [complete troubleshooting guide](docs/Installation-Flow-Diagram.md) for more.
 

@@ -97,10 +97,31 @@ Look for: `state: registered`, `registration: home`,
 sudo mmcli -m 0 --voice-create-call="number=+56XXXXXXXXX"
 mmcli --call=<path>
 ```
-Expected: `dialing` → `ringing-out` → `answered`
+Expected: `dialing` → `ringing-out` → `active` once answered
 (Audio needs SPK+/SPK-/MIC+/MIC- wired to a speaker/mic — not covered here)
 
-**Still open:** data/internet (NetworkManager GSM connection + APN)
+### 15. Set Up Mobile Data
+```bash
+# Installed by setup.sh: suggests the APN for your SIM
+sudo little-rascal-mobile-data
+
+# Manual alternative (WOM Chile shown; use your carrier's APN)
+sudo nmcli connection add type gsm ifname "*" con-name "Mobile Data" apn internet connection.autoconnect yes ipv4.route-metric 700 ipv6.method disabled
+sudo nmcli connection up "Mobile Data"
+
+# Test through the modem (normal traffic stays on Wi-Fi)
+ping -I wwan0 -c 4 8.8.8.8
+```
+
+## 📷 Camera (Optional)
+
+`setup.sh` installs the **Camera** app. For a manual install, see Step 9 of the
+full guide.
+
+- Photos: `~/Pictures/Camera/` (1944x2592)
+- Videos: `~/Videos/Camera/` (1280x720, about 30 fps, no sound)
+- Upside down? Change `ROTATION` in `/usr/local/bin/little-rascal-camera`
+  (270 or 90)
 
 ## 🔧 Quick Fixes
 
@@ -148,7 +169,11 @@ journalctl -xe
 | SSH fails | IP changed, get new IP with `hostname -I` |
 | Black screen | `sudo systemctl restart sddm` |
 | Modem stuck "searching" | Power cycle with SIM/antennas seated before power-on (step 11-12) |
-| Call stuck "dialing", self-terminates | Registration/attach problem — recheck step 13, not a dialing issue |
+| Call stuck "dialing", self-terminates | Recheck step 13; if that's fine, it may be the network (no 3G/2G fallback) |
+| Mobile data won't start | Check registration (step 13) and your carrier's APN |
+| Camera error: "__init__ sequence did not complete" | Another app has the camera open; close it |
+| Camera picture black | Remove any lens cover, add light, then reseat the ribbon cable |
+| Videos won't open, VLC closes | Check `/usr/local/share/applications/vlc.desktop` exists (full guide, Step 9.1) |
 | `mmcli --command` → "Unauthorized: debug mode" | Restart ModemManager in debug mode (see full guide) |
 
 ## 📦 Useful Commands
