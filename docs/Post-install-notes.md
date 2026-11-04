@@ -1,4 +1,4 @@
-# We got to get some shit working
+# Post-install notes
 ## How to begin to flex if there is no screenfetch?
 ### Install screenfetch with:
 ```bash
@@ -6,8 +6,8 @@ sudo apt install screenfetch
 ```
 ## Then flex with:
 ```bash
-stardust@halley:~ $ screenfetch
-         _,met$$$$$gg.           stardust@halley
+pi@raspberrypi:~ $ screenfetch
+         _,met$$$$$gg.           pi@raspberrypi
       ,g$$$$$$$$$$$$$$$P.        OS: Debian 13 trixie
     ,g$$P""       """Y$$.".      Kernel: aarch64 Linux 6.12.47+rpt-rpi-v8
    ,$$P'              `$$$.      Uptime: 8m
@@ -30,7 +30,7 @@ stardust@halley:~ $ screenfetch
 ```bash
 curl -fsS https://dl.brave.com/install.sh | CHANNEL=nightly sh
 ```
-## Install Flatpack Software
+## Install Flatpak Software
 ### Install flatpack
 ```bash
 sudo apt install flatpak
