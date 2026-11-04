@@ -1,10 +1,10 @@
 
-![Alt text](docs/little-rascal-logo-horizontal.png)
+![Little Rascal](docs/little-rascal-logo-horizontal.png)
 # One-Line Installation! 👾
 
-![Alt text](docs/lamina.png)
+![Little Rascal infographic](docs/lamina.png)
 
-[![Ver el video](docs/video-preview.png)](https://youtu.be/av3fPSf0-EM)
+[![Watch the video](docs/video-preview.png)](https://youtu.be/av3fPSf0-EM)
 
 
 # Plasma Mobile on Raspberry Pi 4
@@ -12,7 +12,7 @@
 <img width="1280" height="488" alt="Plasma_Mobile_logo svg" src="https://github.com/user-attachments/assets/b8028824-20c7-4326-953c-b8fe6cebab83" />
 
 
-**A tested, working guide to install Plasma Mobile on Raspberry Pi 4** - the result of 2 years of research and testing.\
+**A tested, working guide to install Plasma Mobile on Raspberry Pi 4** - the result of 3 years of research and testing.
 
 **See docs/Installation-Flow-Diagram.md for flow diagram**
 ## 🚀 Quick Start
@@ -41,7 +41,7 @@ This repository contains **the definitive solution** for installing Plasma Mobil
 
 ## 🎯 Why This Works (And Why Others Don't)
 
-After testing **EVERYTHING** for 2 years:
+After testing **EVERYTHING** for 3 years:
 
 | Method | Status | Reason |
 |--------|--------|--------|
@@ -182,7 +182,7 @@ This is an independent project, not affiliated with or endorsed by Raspberry Pi 
 
 ## 🙏 Credits
 
-**Created after 2 years of research and testing**
+**Created after 3 years of research and testing**
 
 Special thanks to:
 - KDE Plasma Mobile team
@@ -198,7 +198,7 @@ Special thanks to:
 
 ## 📈 Project Statistics
 
-- **Development Time:** 2 years
+- **Development Time:** 3 years
 - **Methods Tested:** 5+ different approaches
 - **Status:** Working on Raspberry Pi 4B (Debian 13 Trixie)
 - **Lines of Code in Installer:** 400+
@@ -231,7 +231,7 @@ If this guide helped you get Plasma Mobile running, please **star this repositor
 
 **Made with ❤️ by Philip McColl, for the community**
 
-*This guide represents 2 years of dedication to making mobile Linux accessible on Raspberry Pi 4*
+*This guide represents 3 years of dedication to making mobile Linux accessible on Raspberry Pi 4*
 
 ## 🔗 Quick Navigation
 

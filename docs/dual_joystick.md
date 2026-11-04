@@ -1,5 +1,7 @@
 # Dual KY-023 Joystick Controller for Raspberry Pi 4
 
+> **Note:** side project notes. The Python scripts and `install.sh` mentioned below are not included in this repository yet.
+
 A complete guide for connecting two KY-023 dual-axis joystick modules to a Raspberry Pi 4 Model B using an ADS1118/ADS1018 16-bit analog-to-digital converter via SPI interface.
 
 ![Project Status](https://img.shields.io/badge/status-active-success.svg)
